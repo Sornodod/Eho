@@ -93,7 +93,10 @@ class EhoSearchView extends ItemView {
     root.empty();
     root.addClass("eho-search-view");
 
-    root.createEl("h3", { text: "Eho: поиск инструкций" });
+    root.createEl("h3", {
+      text: "Eho: поиск инструкций"
+    });
+
     root.createEl("p", {
       text: "Вставь текст заявки или опиши проблему."
     });
@@ -149,6 +152,11 @@ class EhoSearchView extends ItemView {
           if (response.ok) {
             status.setText("Eho API уже запущен.");
             new Notice("Eho API уже работает.");
+
+            // API работает: синхронизируем настройки и запускаем Telegram.
+            await this.plugin.syncTelegramConfig();
+            await this.plugin.ensureTelegramStarted(status);
+            new Notice("Eho API и Telegram готовы.");
             return;
           }
         } catch (_) {
@@ -226,12 +234,17 @@ class EhoSearchView extends ItemView {
           );
         }
 
-        status.setText("Eho API запущен и доступен.");
-        new Notice("Eho API запущен.");
+        await this.plugin.syncTelegramConfig();
+        await this.plugin.ensureTelegramStarted(status);
+
+        status.setText("Eho API и Telegram запущены.");
+        new Notice("Eho API и Telegram готовы.");
       } catch (error) {
         console.error("Eho API startup error:", error);
         status.setText(`Ошибка запуска API: ${error.message}`);
-        new Notice("Не удалось запустить Eho API. Проверь журнал.");
+        new Notice(
+          "Не удалось запустить Eho API. Проверь журнал."
+        );
       } finally {
         if (logFd !== undefined) {
           try {
@@ -253,34 +266,46 @@ class EhoSearchView extends ItemView {
 
       analyzeButton.disabled = true;
       analysis.empty();
-      status.setText("Анализирую заявку через выбранную модель...");
+      status.setText(
+        "Анализирую заявку через выбранную модель..."
+      );
 
       try {
         const settings = this.plugin.settings;
         const vault_path = this.getVaultPath();
 
         if (!settings.llmBaseUrl.trim()) {
-          throw new Error("Не задан URL API в настройках Eho.");
+          throw new Error(
+            "Не задан URL API в настройках Eho."
+          );
         }
 
         if (!settings.llmModel.trim()) {
-          throw new Error("Не задана модель в настройках Eho.");
+          throw new Error(
+            "Не задана модель в настройках Eho."
+          );
         }
 
-        const response = await fetch(`${API_URL}/api/analyze`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            query,
-            vault_path,
-            limit: 6,
-            llm_base_url: settings.llmBaseUrl.trim(),
-            llm_model: settings.llmModel.trim(),
-            llm_api_key: settings.llmApiKey
-          })
-        });
+        // Передаём текущую конфигурацию Telegram API.
+        await this.plugin.syncTelegramConfig();
+
+        const response = await fetch(
+          `${API_URL}/api/analyze`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              query,
+              vault_path,
+              limit: 6,
+              llm_base_url: settings.llmBaseUrl.trim(),
+              llm_model: settings.llmModel.trim(),
+              llm_api_key: settings.llmApiKey
+            })
+          }
+        );
 
         const data = await response.json();
 
@@ -329,6 +354,7 @@ class EhoSearchView extends ItemView {
             }
 
             const openContainer = row.createEl("div");
+
             const open = openContainer.createEl("button", {
               text: "Открыть заметку"
             });
@@ -345,6 +371,7 @@ class EhoSearchView extends ItemView {
       } catch (error) {
         console.error("Eho analysis error:", error);
         status.setText(`Ошибка анализа: ${error.message}`);
+
         new Notice(
           "Не удалось разобрать заявку. Проверь настройки и API."
         );
@@ -366,17 +393,20 @@ class EhoSearchView extends ItemView {
       results.empty();
 
       try {
-        const response = await fetch(`${API_URL}/api/search`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            query,
-            vault_path: this.getVaultPath(),
-            limit: 10
-          })
-        });
+        const response = await fetch(
+          `${API_URL}/api/search`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              query,
+              vault_path: this.getVaultPath(),
+              limit: 10
+            })
+          }
+        );
 
         const data = await response.json();
 
@@ -431,6 +461,7 @@ class EhoSearchView extends ItemView {
       } catch (error) {
         console.error("Eho search error:", error);
         status.setText(`Ошибка: ${error.message}`);
+
         new Notice(
           "Поиск не удался. Проверь API и индекс хранилища."
         );
@@ -472,11 +503,15 @@ class EhoSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Расположение Eho")
-      .setDesc("Открывать поиск в боковой панели или отдельной вкладке.")
+      .setDesc(
+        "Открывать поиск в боковой панели или отдельной вкладке."
+      )
       .addDropdown(dropdown => dropdown
         .addOption("sidebar", "Боковая панель")
         .addOption("tab", "Новая вкладка")
-        .setValue(this.plugin.settings.viewMode || "sidebar")
+        .setValue(
+          this.plugin.settings.viewMode || "sidebar"
+        )
         .onChange(async value => {
           this.plugin.settings.viewMode = value;
           await this.plugin.saveSettings();
@@ -485,14 +520,22 @@ class EhoSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Провайдер")
-      .setDesc("Выбери готовый профиль или укажи собственный API.")
+      .setDesc(
+        "Выбери готовый профиль или укажи собственный API."
+      )
       .addDropdown(dropdown => {
         dropdown
           .addOption("lmstudio", "LM Studio")
-          .addOption("ollama", "Ollama (OpenAI-compatible)")
+          .addOption(
+            "ollama",
+            "Ollama (OpenAI-compatible)"
+          )
           .addOption("openai", "OpenAI")
           .addOption("openrouter", "OpenRouter")
-          .addOption("custom", "Другой OpenAI-совместимый API")
+          .addOption(
+            "custom",
+            "Другой OpenAI-совместимый API"
+          )
           .setValue(this.plugin.settings.provider)
           .onChange(async value => {
             const preset = PROVIDERS[value];
@@ -502,15 +545,7 @@ class EhoSettingTab extends PluginSettingTab {
             if (preset) {
               this.plugin.settings.llmBaseUrl = preset.url;
               this.plugin.settings.llmModel = preset.model;
-
-              if (value === "lmstudio") {
-                this.plugin.settings.llmApiKey = "";
-              } else if (value === "ollama") {
-                this.plugin.settings.llmApiKey = "ollama";
-              } else if (value === "openai" ||
-                         value === "openrouter") {
-                this.plugin.settings.llmApiKey = "";
-              }
+              this.plugin.settings.llmApiKey = preset.key;
             }
 
             await this.plugin.saveSettings();
@@ -533,7 +568,9 @@ class EhoSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Название модели")
-      .setDesc("Идентификатор модели, поддерживаемый выбранным API.")
+      .setDesc(
+        "Идентификатор модели, поддерживаемый выбранным API."
+      )
       .addText(text =>
         text
           .setPlaceholder("Название модели")
@@ -564,7 +601,9 @@ class EhoSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Проверка API")
-      .setDesc("Проверяет соединение и доступность выбранной модели.")
+      .setDesc(
+        "Проверяет соединение и доступность выбранной модели."
+      )
       .addButton(button => {
         button
           .setButtonText("Проверить")
@@ -573,17 +612,23 @@ class EhoSettingTab extends PluginSettingTab {
             button.setButtonText("Проверка...");
 
             try {
-              const response = await fetch(`${API_URL}/api/provider-check`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  llm_base_url: this.plugin.settings.llmBaseUrl,
-                  llm_model: this.plugin.settings.llmModel,
-                  llm_api_key: this.plugin.settings.llmApiKey
-                })
-              });
+              const response = await fetch(
+                `${API_URL}/api/provider-check`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json"
+                  },
+                  body: JSON.stringify({
+                    llm_base_url:
+                      this.plugin.settings.llmBaseUrl,
+                    llm_model:
+                      this.plugin.settings.llmModel,
+                    llm_api_key:
+                      this.plugin.settings.llmApiKey
+                  })
+                }
+              );
 
               const data = await response.json();
 
@@ -640,6 +685,10 @@ module.exports = class EhoSearchPlugin extends Plugin {
       name: "Открыть поиск инструкций Eho",
       callback: () => this.activateView()
     });
+
+    // Восстанавливаем конфигурацию Telegram после загрузки плагина.
+    // Если API ещё не запущен, синхронизация повторится при анализе.
+    await this.syncTelegramConfig();
   }
 
   async loadSettings() {
@@ -652,6 +701,77 @@ module.exports = class EhoSearchPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    await this.syncTelegramConfig();
+  }
+
+  async ensureTelegramStarted(status) {
+    const statusResponse = await fetch(
+      `${API_URL}/api/telegram/status`
+    );
+
+    if (!statusResponse.ok) {
+      throw new Error("Не удалось проверить состояние Telegram.");
+    }
+
+    const telegram = await statusResponse.json();
+
+    if (telegram.enabled) {
+      status.setText("Eho API и Telegram уже работают.");
+      return;
+    }
+
+    status.setText("Запускаю Telegram-бота...");
+
+    const startResponse = await fetch(
+      `${API_URL}/api/telegram/start`,
+      { method: "POST" }
+    );
+
+    if (!startResponse.ok) {
+      const detail = await startResponse.text();
+      throw new Error(`Не удалось запустить Telegram: ${detail}`);
+    }
+  }
+
+  async syncTelegramConfig() {
+    const settings = this.settings;
+
+    if (
+      !settings.llmBaseUrl?.trim() ||
+      !settings.llmModel?.trim()
+    ) {
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/telegram/config`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            llm_base_url: settings.llmBaseUrl.trim(),
+            llm_model: settings.llmModel.trim(),
+            llm_api_key: settings.llmApiKey || ""
+          })
+        }
+      );
+
+      if (!response.ok) {
+        console.error(
+          "Eho: не удалось синхронизировать настройки Telegram:",
+          response.status,
+          await response.text()
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Eho: Telegram API недоступен для синхронизации настроек:",
+        error
+      );
+    }
   }
 
   async activateView() {
