@@ -1,13 +1,17 @@
 
 import asyncio
+import logging
 import os
+import re
 from contextlib import suppress
+from html import escape
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,9 +22,12 @@ from telegram.ext import (
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/telegram", tags=["Telegram"])
 
 API_URL = "http://127.0.0.1:8765"
+TELEGRAM_MESSAGE_LIMIT = 4000
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 VAULT_PATH = os.getenv("EHO_VAULT_PATH", "").strip()
@@ -43,6 +50,110 @@ class TelegramLLMConfig(BaseModel):
 _bot: Application | None = None
 _lock = asyncio.Lock()
 _llm_config: TelegramLLMConfig | None = None
+
+
+def markdown_to_telegram(text: str) -> str:
+    """Преобразует распространённый Markdown в HTML Telegram."""
+    lines = text.splitlines()
+    result = []
+    in_code_block = False
+    code_lines = []
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            if in_code_block:
+                result.append(
+                    "<pre>" + escape("\n".join(code_lines)) + "</pre>"
+                )
+                code_lines = []
+                in_code_block = False
+            else:
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            code_lines.append(line)
+            continue
+
+        bullet = re.match(r"^\s*[*+-]\s+(.*)$", line)
+        numbered = re.match(r"^\s*\d+[.)]\s+(.*)$", line)
+
+        if bullet:
+            line = "• " + bullet.group(1)
+        elif numbered:
+            line = numbered.group(1)
+
+        line = escape(line)
+
+        code_spans = []
+
+        def save_code(match):
+            code_spans.append(
+                "<code>" + match.group(1) + "</code>"
+            )
+            return f"\x00CODE{len(code_spans) - 1}\x00"
+
+        line = re.sub(r"`([^`\n]+)`", save_code, line)
+
+        line = re.sub(
+            r"\*\*(.+?)\*\*",
+            r"<b>\1</b>",
+            line,
+        )
+        line = re.sub(
+            r"(?<!\*)\*([^*\n]+)\*(?!\*)",
+            r"<i>\1</i>",
+            line,
+        )
+        line = re.sub(
+            r"(?<!_)_([^_\n]+)_(?!_)",
+            r"<i>\1</i>",
+            line,
+        )
+
+        for index, code in enumerate(code_spans):
+            line = line.replace(f"\x00CODE{index}\x00", code)
+
+        result.append(line)
+
+    if in_code_block:
+        result.append(
+            "<pre>" + escape("\n".join(code_lines)) + "</pre>"
+        )
+
+    return "\n".join(result)
+
+
+def split_telegram_html(
+    text: str,
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
+) -> list[str]:
+    """Разбивает HTML по строкам, стараясь не разрезать теги."""
+    paragraphs = text.split("\n")
+    chunks = []
+    current = []
+
+    for paragraph in paragraphs:
+        candidate = "\n".join(current + [paragraph])
+
+        if len(candidate) <= limit:
+            current.append(paragraph)
+            continue
+
+        if current:
+            chunks.append("\n".join(current))
+            current = []
+
+        if len(paragraph) > limit:
+            for offset in range(0, len(paragraph), limit):
+                chunks.append(paragraph[offset:offset + limit])
+        else:
+            current = [paragraph]
+
+    if current:
+        chunks.append("\n".join(current))
+
+    return chunks
 
 
 @router.post("/config")
@@ -115,9 +226,7 @@ async def handle_message(
         )
         return
 
-    status = await message.reply_text(
-        "Анализирую запрос через Eho…"
-    )
+    status = await message.reply_text("Анализирую запрос через Eho…")
 
     try:
         async with httpx.AsyncClient(timeout=240) as client:
@@ -135,18 +244,30 @@ async def handle_message(
             response.raise_for_status()
             result = response.json()
 
-        answer = result.get(
-            "answer",
-            "Eho не вернул текст ответа.",
+        answer = str(
+            result.get("answer", "Eho не вернул текст ответа.")
         )
 
         with suppress(Exception):
             await status.delete()
 
-        for offset in range(0, len(answer), 4000):
-            await message.reply_text(
-                answer[offset:offset + 4000]
-            )
+        formatted = markdown_to_telegram(answer)
+        chunks = split_telegram_html(formatted)
+
+        for chunk in chunks:
+            try:
+                await message.reply_text(
+                    chunk,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Telegram HTML send failed: %s",
+                    type(exc).__name__,
+                )
+                await message.reply_text(
+                    chunk[:TELEGRAM_MESSAGE_LIMIT]
+                )
 
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:1000]
@@ -158,6 +279,8 @@ async def handle_message(
             )
 
     except Exception:
+        logger.exception("Eho Telegram message handler failed")
+
         with suppress(Exception):
             await status.edit_text(
                 "Не удалось выполнить анализ. "
@@ -229,9 +352,7 @@ async def telegram_start():
             await bot.start()
 
             if bot.updater is None:
-                raise RuntimeError(
-                    "Telegram updater недоступен."
-                )
+                raise RuntimeError("Telegram updater недоступен.")
 
             await bot.updater.start_polling()
             _bot = bot
